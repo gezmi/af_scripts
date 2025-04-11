@@ -402,6 +402,11 @@ def main():
 	
 	if args.input_file.endswith('.a3m'):
 		seeds = [int(seed) for seed in args.seeds.split(',')]
+		
+		if args.server and len(seeds) > 1:
+			print('The server only supports one seeds. Aborting.')
+			sys.exit(1)
+		
 		use_templates = not args.no_templates
 		process_a3m_file(args.input_file, args.output_dir, args.add_path, args.suffix, args.server,
 		                 seeds, use_templates, args.max_temp_date)
