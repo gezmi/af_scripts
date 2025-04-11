@@ -19,6 +19,9 @@ import re
 import json
 import argparse
 
+from tqdm.utils import disp_len
+
+
 ###### A3M TO JSON ######
 
 def split_sequence_by_chains(sequence, lengths):
@@ -81,7 +84,7 @@ def get_data_from_a3m(a3m_lines):
 	
 	sequences = split_sequence_by_chains(full_seq, chains)
 	
-	return chains, dummy_chain_names, sequences, header[0]
+	return chains, dummy_chain_names, sequences, header[0], stoch
 
 
 def split_msa_vertically(chains, dummy_chain_names, a3m_lines):
@@ -115,7 +118,50 @@ def split_msa_vertically(chains, dummy_chain_names, a3m_lines):
 	return dict_a3m_per_chain
 
 
-def create_json_structure(name, sequences, msas=None, add_path=False):
+def create_one_job_server(name, sequences, stoch, seeds=[1], use_templates=True, max_temp_date='3000-01-01'):
+	return  {
+		"modelSeeds": seeds,
+		"name": name,
+		"dialect": 'alphafoldserver',
+		"version": 1,
+		"sequences": [
+			{
+				'proteinChain': {
+					"sequence": seq,
+					"useStructureTemplate": use_templates,
+					"maxTemplateDate": max_temp_date,
+					"count": int(stoch[i]) if stoch and i < len(stoch) else 1
+				}
+			}
+			for i, seq in enumerate(sequences)
+		]
+	}
+
+
+def create_local_job(name, sequences, msas, stoch, seeds=[1]):
+	
+	return  {
+		"modelSeeds": seeds,
+		"name": name,
+		"dialect": 'alphafold3',
+		"version": "2",
+		"sequences": [
+			{
+				'protein': {
+					"id": [chr(65 + i)],  # Single letter for each chain (A, B, C...)
+					"sequence": seq,
+					"unpairedMsa": ''.join(msas[i]) if i < len(msas) else [],
+					"pairedMsa": '',
+					"copies": int(stoch[i]) if stoch and i < len(stoch) else 1
+				}
+			}
+			for i, seq in enumerate(sequences)
+		]
+	}
+
+
+def create_json_structure(name, sequences, stoch=None, msas=None, add_path=False, server=False,
+                          seeds=[1], use_templates=True, max_temp_date='3000-01-01'):
 	"""
 	Create the JSON structure with separate chains.
 
@@ -127,26 +173,14 @@ def create_json_structure(name, sequences, msas=None, add_path=False):
 	Returns:
 		dict: JSON-compatible dictionary with chain information
 	"""
-	if msas is None:
-		msas = []
+	msas = [] if msas is None else msas
 	
-	join_on = '' if add_path else '\n'
-	
-	return {
-		"modelSeeds": [1],
-		"name": name,
-		"sequences": [
-			{
-				"protein": {
-					"id": [chr(65 + i)],  # Single letter for each chain (A, B, C...)
-					"sequence": seq,
-					"unpairedMsa": join_on.join(msas[i]) if i < len(msas) else [],
-					"pairedMsa": ''
-				}
-			}
-			for i, seq in enumerate(sequences)
-		]
-	}
+	if server:
+		json_data = [create_one_job_server(name, sequences, stoch, seeds, use_templates, max_temp_date)]
+	else:
+		json_data = create_local_job(name, sequences, msas, stoch, seeds)
+
+	return json_data
 
 
 def write_chainwise_a3m(dict_a3m_per_chain, output_dir='.'):
@@ -167,7 +201,8 @@ def write_chainwise_a3m(dict_a3m_per_chain, output_dir='.'):
 	return files
 
 
-def process_a3m_file(input_file, output_dir='.', add_path=False, suffix=''):
+def process_a3m_file(input_file, output_dir='.', add_path=False, suffix='', server=False,
+                     seeds=[1], use_templates=True, max_temp_date='3000-01-01'):
 	"""
 	Process an A3M file and convert it to a structured JSON format.
 
@@ -190,7 +225,7 @@ def process_a3m_file(input_file, output_dir='.', add_path=False, suffix=''):
 	lines = [line.strip() for line in lines if line.strip()]
 	
 	# Extract data from the A3M file
-	chains, dummy_chain_names, sequences, header_name = get_data_from_a3m(lines)
+	chains, dummy_chain_names, sequences, header_name, stoch = get_data_from_a3m(lines)
 	
 	# Split MSA entries vertically by chain
 	dict_a3m_per_chain = split_msa_vertically(chains, dummy_chain_names, lines[1:])
@@ -204,7 +239,8 @@ def process_a3m_file(input_file, output_dir='.', add_path=False, suffix=''):
 		basename = f'{basename}_{suffix}'
 	
 	# Create the JSON structure
-	json_data = create_json_structure(basename, sequences, list(dict_a3m_per_chain.values()), add_path)
+	json_data = create_json_structure(basename, sequences, stoch, list(dict_a3m_per_chain.values()),
+	                                  add_path, server, seeds, use_templates, max_temp_date)
 
 	output_file = f"{basename}.json"
 	output_file = os.path.join(output_dir, os.path.basename(output_file))
@@ -350,10 +386,14 @@ def main():
 	Main function to parse command-line arguments and process the input files based on their extension
 	"""
 	parser = argparse.ArgumentParser(description='Convert A3M files to a JSON structure with separated chains.')
-	parser.add_argument('input_file', help='Path to the input A3M file')
+	parser.add_argument('input_file', type=str, help='Path to the input file(s)')
 	parser.add_argument('--output_dir', '-o', help='Path to the output JSON file (default: input_name.json)')
 	parser.add_argument('--add_path', '-p', action='store_true', help='Do not add the whole MSA, just the path, when the output is JSON file')
 	parser.add_argument('--suffix', '-s', default='', help='append string to the output file name, before the extension')
+	parser.add_argument('--server', '-r', action='store_true', help='aWhen converting to json, use the AF3 server format-')
+	parser.add_argument('--seeds', '-e', default='1', type=str, help='Number of seeds for the AF3 server')
+	parser.add_argument('--no_templates', '-n', action='store_true', help='Do not use templates on the AF3 server (default: use)')
+	parser.add_argument('--max_temp_date', '-m', default='3000-01-01', help='Max template date when using server')
 	args = parser.parse_args()
 	
 	# write to file, join with new lines
@@ -361,7 +401,10 @@ def main():
 		os.makedirs(args.output_dir)
 	
 	if args.input_file.endswith('.a3m'):
-		process_a3m_file(args.input_file, args.output_dir, args.add_path, args.suffix)
+		seeds = [int(seed) for seed in args.seeds.split(',')]
+		use_templates = not args.no_templates
+		process_a3m_file(args.input_file, args.output_dir, args.add_path, args.suffix, args.server,
+		                 seeds, use_templates, args.max_temp_date)
 	elif args.input_file.endswith('.json'):
 		process_json_file(args.input_file, args.output_dir, args.suffix)
 	else:
