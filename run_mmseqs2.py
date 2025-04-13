@@ -2,10 +2,22 @@ import logging
 logger = logging.getLogger(__name__)
 import os
 from pathlib import Path
-from colabfold.batch import *
 import argparse
 import glob
 import json
+import types, sys
+
+# Otherwise on some CPU-s, the code crashes with not being able to import jax
+class MockModule(types.ModuleType):
+    def __getattr__(self, name):
+        return None
+
+sys.modules['colabfold.alphafold.extra_ptm'] = MockModule('colabfold.alphafold.extra_ptm')
+sys.modules['jax'] = MockModule('jax')
+sys.modules['jax.numpy'] = MockModule('jax.numpy')
+
+# This was the problem before the patch above
+from colabfold.batch import *
 
 
 def split_input_by_chains(sequence, lengths):
